@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Car Environment with Rapier Physics</title>
+    <style>
+        body {
+            margin: 0;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #debug {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            font-family: Arial, sans-serif;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="debug"></div>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js",
+                "three/GLTFLoader": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/loaders/GLTFLoader.js",
+                "three/OrbitControls": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/controls/OrbitControls.js",
+                "rapier": "./rapier.es.js",
+                "three/EffectComposer": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/EffectComposer.js",
+                "three/RenderPass": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/RenderPass.js",
+                "three/UnrealBloomPass": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/UnrealBloomPass.js",
+                "three/FilmPass": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/FilmPass.js",
+                "three/SSAOPass": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/SSAOPass.js",
+                "three/ShaderPass": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/postprocessing/ShaderPass.js",
+                "three/FXAAShader": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/shaders/FXAAShader.js"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/GLTFLoader';
+        import { OrbitControls } from 'three/OrbitControls';
+        import { EffectComposer } from 'three/EffectComposer';
+        import { RenderPass } from 'three/RenderPass';
+        import { SSAOPass } from 'three/SSAOPass';
+        import { UnrealBloomPass } from 'three/UnrealBloomPass';
+        import { ShaderPass } from 'three/ShaderPass';
+        import { FXAAShader } from 'three/FXAAShader';
+        import { initPhysics, updatePhysics, createCollectibleCube, world } from './physics.js';
+        import * as RAPIER from 'rapier';
+
+        // Scene Setup (unchanged)
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Post-Processing Composer (unchanged)
+        const composer = new EffectComposer(renderer);
+        const renderPass = new RenderPass(scene, camera);
+        composer.addPass(renderPass);
+
+        const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+        ssaoPass.radius = 0.5;
+        ssaoPass.samples = 32;
+
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.strength = 0.1;
+        bloomPass.radius = 1;
+        bloomPass.threshold = 0.115;
+        bloomPass.exposure = 2;
+        composer.addPass(bloomPass);
+
+        const fxaaPass = new ShaderPass(FXAAShader);
+        fxaaPass.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+        composer.addPass(fxaaPass);
+
+        // Clock (unchanged)
+        const clock = new THREE.Clock();
+
+        // Ambient Lighting (unchanged)
+        const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x232323, 1);
+        scene.add(hemisphereLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(5, 10, 7.5);
+        scene.add(directionalLight);
+
+        // Ground (unchanged)
+        const groundGeometry = new THREE.PlaneGeometry(200, 200);
+        const textureLoader = new THREE.TextureLoader();
+        textureLoader.load(
+            'assets/road_texture.jpg',
+            (texture) => {
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+                texture.repeat.set(20, 20);
+                // const groundMaterial = new THREE.MeshStandardMaterial({
+                //     map: texture,
+                //     side: THREE.DoubleSide
+                // });
+                const groundMaterial = new THREE.MeshStandardMaterial({
+                    roughness: 1.0,
+                    metalness: 0,
+                    color: 0x1c1c1c
+                });
+                groundMaterial.polygonOffset = true;
+                groundMaterial.polygonOffsetFactor = 1;
+                groundMaterial.polygonOffsetUnits = 1;
+                const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+                ground.rotation.x = -Math.PI / 2;
+                scene.add(ground);
+            },
+            (progress) => {
+                console.log(`Loading ground texture: ${(progress.loaded / progress.total * 100).toFixed(2)}%`);
+            },
+            (error) => {
+                console.error('Error loading ground texture:', error);
+                const fallbackMaterial = new THREE.MeshStandardMaterial({ color: 0x3a3a3a });
+                fallbackMaterial.polygonOffset = true;
+                fallbackMaterial.polygonOffsetFactor = 1;
+                fallbackMaterial.polygonOffsetUnits = 1;
+                const ground = new THREE.Mesh(groundGeometry, fallbackMaterial);
+                ground.rotation.x = -Math.PI / 2;
+                scene.add(ground);
+            }
+        );
+
+        let grid = new THREE.GridHelper(200, 100, 0xffffff, 0xffffff);
+        grid.material.opacity = 0.2;
+        grid.material.depthWrite = false;
+        grid.material.transparent = true;
+        scene.add(grid);
+
+        // Skybox (unchanged)
+        const skyGeometry = new THREE.SphereGeometry(500, 32, 32);
+        const skyUniforms = {
+            minY: { value: 0 },
+            maxY: { value: 500 },
+            colorBottom: { value: new THREE.Color('#ADD8E6') },
+            colorTop: { value: new THREE.Color('#000080') }
+        };
+        const skyMaterial = new THREE.ShaderMaterial({
+            uniforms: skyUniforms,
+            vertexShader: `
+                varying float vY;
+                void main() {
+                    vY = position.y;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying float vY;
+                uniform float minY;
+                uniform float maxY;
+                uniform vec3 colorBottom;
+                uniform vec3 colorTop;
+                void main() {
+                    float t = (vY - minY) / (maxY - minY);
+                    t = clamp(t, 0.0, 1.0);
+                    vec3 color = mix(colorBottom, colorTop, t);
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            `,
+            side: THREE.BackSide
+        });
+        const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+        scene.add(sky);
+
+        textureLoader.load(
+            'assets/wall_texture.jpg',
+            (texture) => {
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+                texture.repeat.set(40, 2);
+                const wallMaterial = new THREE.MeshStandardMaterial({
+                    map: texture,
+                    side: THREE.DoubleSide
+                });
+
+                const whiteMaterial = new THREE.MeshStandardMaterial({
+                    roughness: 1.0,
+                    metalness: 0,
+                    color: 0x555555
+                });
+
+                const greenMaterial = new THREE.MeshStandardMaterial({
+                    roughness: 1.0,
+                    metalness: 0,
+                    color: 0x417818
+                });
+
+                const redMaterial = new THREE.MeshStandardMaterial({
+                    roughness: 1.0,
+                    metalness: 0,
+                    color: 0x8a2323
+                });
+
+                const blueMaterial = new THREE.MeshStandardMaterial({
+                    roughness: 1.0,
+                    metalness: 0,
+                    color: 0x232f8a
+                });
+
+                const purpleMaterial = new THREE.MeshStandardMaterial({
+                    roughness: 1.0,
+                    metalness: 0,
+                    color: 0x7f238a
+                });
+
+
+
+                // **************************
+                // **Connector Group - Level 2**
+                // **************************
+
+                // **Connector Group - Level 2: Connector West**
+                const innerPlatformConnectorWestGeometry = new THREE.BoxGeometry(10, 1, 90);
+                const innerPlatformConnectorWest = new THREE.Mesh(innerPlatformConnectorWestGeometry, whiteMaterial);
+                innerPlatformConnectorWest.position.set(-60, 6.95, 0);
+                scene.add(innerPlatformConnectorWest);
+
+                // **Connector Group - Level 2: Connector East**
+                const innerPlatformConnectorEastGeometry = new THREE.BoxGeometry(10, 1, 90);
+                const innerPlatformConnectorEast = new THREE.Mesh(innerPlatformConnectorEastGeometry, whiteMaterial);
+                innerPlatformConnectorEast.position.set(60, 6.95, 0);
+                scene.add(innerPlatformConnectorEast);
+
+                // **Connector Group - Level 2: Connector North**
+                const innerPlatformConnectorNorthGeometry = new THREE.BoxGeometry(90, 1, 10);
+                const innerPlatformConnectorNorth = new THREE.Mesh(innerPlatformConnectorNorthGeometry, whiteMaterial);
+                innerPlatformConnectorNorth.position.set(0, 6.95, -60);
+                scene.add(innerPlatformConnectorNorth);
+
+                // **Connector Group - Level 2: Connector South**
+                const innerPlatformConnectorSouthGeometry = new THREE.BoxGeometry(90, 1, 10);
+                const innerPlatformConnectorSouth = new THREE.Mesh(innerPlatformConnectorSouthGeometry, whiteMaterial);
+                innerPlatformConnectorSouth.position.set(0, 6.95, 60);
+                scene.add(innerPlatformConnectorSouth);
+
+                // **************************
+                // **Inner Platform 1 Group**
+                // **************************
+
+                // **Inner Platform 1 Group: Level 1**
+                const innerPlatform1Geometry = new THREE.BoxGeometry(40, 5, 40);
+                const innerPlatform1 = new THREE.Mesh(innerPlatform1Geometry, greenMaterial);
+                innerPlatform1.position.set(-55, 0.5, 55);
+                scene.add(innerPlatform1);
+
+                // **Inner Platform 1 Group: Block Addition 1**
+                const innerPlatform1Addition1Geometry = new THREE.BoxGeometry(7, 5, 17.6);
+                const innerPlatform1Addition1 = new THREE.Mesh(innerPlatform1Addition1Geometry, greenMaterial);
+                innerPlatform1Addition1.position.set(-31.5, 0.5, 66.25);
+                scene.add(innerPlatform1Addition1);
+
+                // **Inner Platform 1 Group: Block Addition 2**
+                const innerPlatform1Addition2Geometry = new THREE.BoxGeometry(17.6, 5, 7);
+                const innerPlatform1Addition2 = new THREE.Mesh(innerPlatform1Addition2Geometry, greenMaterial);
+                innerPlatform1Addition2.position.set(-66.25, 0.5, 31.5);
+                scene.add(innerPlatform1Addition2);
+
+                const rampWidth = 7;
+                const rampThickness = 0.1;
+                const rampLength = 44.5;
+                const rampAngle = Math.asin(4 / 30);
+                const rampBase = Math.sqrt(30 * 30 - 20 * 20);
+                const rampHeight = 0;
+                const rampGeometry = new THREE.BoxGeometry(rampWidth, rampThickness, rampLength);
+                const rampMaterial = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+
+                // **Inner Platform 1 Group: Level 1 Ramp 1 (South)**
+                const innerPlatform1ramp1 = new THREE.Mesh(rampGeometry, whiteMaterial);
+                innerPlatform1ramp1.position.set(-31.5, rampHeight / 2, 35.5);
+                innerPlatform1ramp1.rotation.x = -rampAngle;
+                scene.add(innerPlatform1ramp1);
+
+                // **Inner Platform 1 Group: Level 1 Ramp 1 (West)**
+                const rampGeometry2 = new THREE.BoxGeometry(rampLength, rampThickness, rampWidth);
+                const innerPlatform1ramp2 = new THREE.Mesh(rampGeometry2, whiteMaterial);
+                innerPlatform1ramp2.position.set(-35.5, rampHeight / 2, 31.5);
+                innerPlatform1ramp2.rotation.z = -rampAngle;
+                scene.add(innerPlatform1ramp2);
+
+                const rampGeometry3 = new THREE.BoxGeometry(rampWidth, rampThickness, 35);
+
+                // **Inner Platform 1 Group: Level 2 Ramp 1 (North)**
+                const innerPlatform1Level2ramp1 = new THREE.Mesh(rampGeometry3, whiteMaterial);
+                innerPlatform1Level2ramp1.position.set(-41.5, 5.1, 46);
+                innerPlatform1Level2ramp1.rotation.x = rampAngle;
+                scene.add(innerPlatform1Level2ramp1);
+
+                // **Inner Platform 1 Group: Level 2**
+                const innerPlatform1Level2Geometry = new THREE.BoxGeometry(20, 10, 20);
+                const innerPlatform1Level2 = new THREE.Mesh(innerPlatform1Level2Geometry, greenMaterial);
+                innerPlatform1Level2.position.set(-55, 2.45, 55);
+                scene.add(innerPlatform1Level2);
+
+                // **Inner Platform 1 Group: Level 2 Landing**
+                const innerPlatform1Level2ramp1LandingGeometry = new THREE.BoxGeometry(rampWidth + 10, 0.1, 7.6);
+                const innerPlatform1Level2ramp1Landing = new THREE.Mesh(innerPlatform1Level2ramp1LandingGeometry, whiteMaterial);
+                innerPlatform1Level2ramp1Landing.position.set(-46.5, 7.425, 25);
+                scene.add(innerPlatform1Level2ramp1Landing);
+
+                // **************************
+                // **Inner Platform 2 Group**
+                // **************************
+
+                // **Inner Platform 2 Group: Level 1**
+                const innerPlatform2 = new THREE.Mesh(innerPlatform1Geometry, redMaterial);
+                innerPlatform2.position.set(55, 0.5, -55);
+                scene.add(innerPlatform2);
+
+                // **Inner Platform 2 Group: Block Addition 1**
+                const innerPlatform2Addition1Geometry = new THREE.BoxGeometry(7, 5, 17.6);
+                const innerPlatform2Addition1 = new THREE.Mesh(innerPlatform1Addition1Geometry, redMaterial);
+                innerPlatform2Addition1.position.set(31.5, 0.5, -66.25);
+                scene.add(innerPlatform2Addition1);
+
+                // **Inner Platform 2 Group: Block Addition 2**
+                const innerPlatform2Addition2Geometry = new THREE.BoxGeometry(17.6, 5, 7);
+                const innerPlatform2Addition2 = new THREE.Mesh(innerPlatform1Addition2Geometry, redMaterial);
+                innerPlatform2Addition2.position.set(66.25, 0.5, -31.5);
+                scene.add(innerPlatform2Addition2);
+
+                // **Inner Platform 2 Group: Level 1 Ramp 1 (North)**
+                const innerPlatform2ramp1 = new THREE.Mesh(rampGeometry, whiteMaterial);
+                innerPlatform2ramp1.position.set(31.5, rampHeight / 2, -35.5);
+                innerPlatform2ramp1.rotation.x = rampAngle;
+                scene.add(innerPlatform2ramp1);
+
+                // **Inner Platform 2 Group: Level 1 Ramp 2 (West)**
+                const innerPlatform2ramp2 = new THREE.Mesh(rampGeometry2, whiteMaterial);
+                innerPlatform2ramp2.position.set(35.5, rampHeight / 2, -31.5);
+                innerPlatform2ramp2.rotation.z = rampAngle;
+                scene.add(innerPlatform2ramp2);
+
+                // **Inner Platform 2 Group: Level 2 Ramp 1 (South)**
+                const innerPlatform2Level2ramp1 = new THREE.Mesh(rampGeometry3, whiteMaterial);
+                innerPlatform2Level2ramp1.position.set(41.5, 5.1, -46);
+                innerPlatform2Level2ramp1.rotation.x = -rampAngle;
+                scene.add(innerPlatform2Level2ramp1);
+
+                // **Inner Platform 2 Group: Level 2**
+                const innerPlatform2Level2Geometry = new THREE.BoxGeometry(20, 10, 20);
+                const innerPlatform2Level2 = new THREE.Mesh(innerPlatform1Level2Geometry, redMaterial);
+                innerPlatform2Level2.position.set(55, 2.45, -55);
+                scene.add(innerPlatform2Level2);
+
+                // **Inner Platform 2 Group: Level 2 Landing**
+                const innerPlatform2Level2ramp1LandingGeometry = new THREE.BoxGeometry(rampWidth + 10, 0.1, 7.6);
+                const innerPlatform2Level2ramp1Landing = new THREE.Mesh(innerPlatform2Level2ramp1LandingGeometry, whiteMaterial);
+                innerPlatform2Level2ramp1Landing.position.set(46.5, 7.425, -25);
+                scene.add(innerPlatform2Level2ramp1Landing);
+
+                // **************************
+                // **Inner Platform 3 Group**
+                // **************************
+
+                // **Inner Platform 3 Group: Level 1**
+                const innerPlatform3 = new THREE.Mesh(innerPlatform1Geometry, blueMaterial);
+                innerPlatform3.position.set(-55, 0.5, -55);
+                scene.add(innerPlatform3);
+
+                // **Inner Platform 3 Group: Block Addition 1**
+                const innerPlatform3Addition1Geometry = new THREE.BoxGeometry(7, 5, 17.6);
+                const innerPlatform3Addition1 = new THREE.Mesh(innerPlatform1Addition1Geometry, blueMaterial);
+                innerPlatform3Addition1.position.set(-31.5, 0.5, -66.25);
+                scene.add(innerPlatform3Addition1);
+
+                // **Inner Platform 3 Group: Block Addition 2**
+                const innerPlatform3Addition2Geometry = new THREE.BoxGeometry(17.6, 5, 7);
+                const innerPlatform3Addition2 = new THREE.Mesh(innerPlatform1Addition2Geometry, blueMaterial);
+                innerPlatform3Addition2.position.set(-66.25, 0.5, -31.5);
+                scene.add(innerPlatform3Addition2);
+
+                // **Inner Platform 3 Group: Level 1 Ramp 1 (West)**
+                const innerPlatform3ramp1 = new THREE.Mesh(rampGeometry, whiteMaterial);
+                innerPlatform3ramp1.position.set(-31.5, rampHeight / 2, -35.5);
+                innerPlatform3ramp1.rotation.x = rampAngle;
+                scene.add(innerPlatform3ramp1);
+
+                // **Inner Platform 3 Group: Level 1 Ramp 2 (North)**
+                const innerPlatform3ramp2 = new THREE.Mesh(rampGeometry2, whiteMaterial);
+                innerPlatform3ramp2.position.set(-35.5, rampHeight / 2, -31.5);
+                innerPlatform3ramp2.rotation.z = -rampAngle;
+                scene.add(innerPlatform3ramp2);
+
+                // **Inner Platform 3 Group: Level 2 Ramp 1 (South)**
+                const innerPlatform3Level2ramp1 = new THREE.Mesh(rampGeometry3, whiteMaterial);
+                innerPlatform3Level2ramp1.position.set(-41.5, 5.1, -46);
+                innerPlatform3Level2ramp1.rotation.x = -rampAngle;
+                scene.add(innerPlatform3Level2ramp1);
+
+                // **Inner Platform 3 Group: Level 2**
+                const innerPlatform3Level2Geometry = new THREE.BoxGeometry(20, 10, 20);
+                const innerPlatform3Level2 = new THREE.Mesh(innerPlatform1Level2Geometry, blueMaterial);
+                innerPlatform3Level2.position.set(-55, 2.45, -55);
+                scene.add(innerPlatform3Level2);
+
+                // **Inner Platform 3 Group: Level 2 Landing**
+                const innerPlatform3Level2ramp1LandingGeometry = new THREE.BoxGeometry(rampWidth + 10, 0.1, 7.6);
+                const innerPlatform3Level2ramp1Landing = new THREE.Mesh(innerPlatform3Level2ramp1LandingGeometry, whiteMaterial);
+                innerPlatform3Level2ramp1Landing.position.set(-46.5, 7.425, -25);
+                scene.add(innerPlatform3Level2ramp1Landing);
+
+
+
+                // **************************
+                // **Inner Platform 4 Group**
+                // **************************
+
+                // **Inner Platform 4 Group: Level 1**
+                const innerPlatform4 = new THREE.Mesh(innerPlatform1Geometry, purpleMaterial);
+                innerPlatform4.position.set(55, 0.5, 55);
+                scene.add(innerPlatform4);
+
+                // **Inner Platform 4 Group: Block Addition 1**
+                const innerPlatform4Addition1Geometry = new THREE.BoxGeometry(7, 5, 17.6);
+                const innerPlatform4Addition1 = new THREE.Mesh(innerPlatform1Addition1Geometry, purpleMaterial);
+                innerPlatform4Addition1.position.set(31.5, 0.5, 66.25);
+                scene.add(innerPlatform4Addition1);
+
+                // **Inner Platform 4 Group: Block Addition 2**
+                const innerPlatform4Addition2Geometry = new THREE.BoxGeometry(17.6, 5, 7);
+                const innerPlatform4Addition2 = new THREE.Mesh(innerPlatform1Addition2Geometry, purpleMaterial);
+                innerPlatform4Addition2.position.set(66.25, 0.5, 31.5);
+                scene.add(innerPlatform4Addition2);
+
+                // **Inner Platform 4 Group: Level 1 Ramp 1 (East)**
+                const innerPlatform4ramp1 = new THREE.Mesh(rampGeometry, whiteMaterial);
+                innerPlatform4ramp1.position.set(31.5, rampHeight / 2, 35.5);
+                innerPlatform4ramp1.rotation.x = -rampAngle;
+                scene.add(innerPlatform4ramp1);
+
+                // **Inner Platform 4 Group: Level 1 Ramp 2 (South)**
+                const innerPlatform4ramp2 = new THREE.Mesh(rampGeometry2, whiteMaterial);
+                innerPlatform4ramp2.position.set(35.5, rampHeight / 2, 31.5);
+                innerPlatform4ramp2.rotation.z = rampAngle;
+                scene.add(innerPlatform4ramp2);
+
+                // **Inner Platform 3 Group: Level 2 Ramp 1 (North)**
+                const innerPlatform4Level2ramp1 = new THREE.Mesh(rampGeometry3, whiteMaterial);
+                innerPlatform4Level2ramp1.position.set(41.5, 5.1, 46);
+                innerPlatform4Level2ramp1.rotation.x = rampAngle;
+                scene.add(innerPlatform4Level2ramp1);
+
+                // **Inner Platform 4 Group: Level 2**
+                const innerPlatform4Level2Geometry = new THREE.BoxGeometry(20, 10, 20);
+                const innerPlatform4Level2 = new THREE.Mesh(innerPlatform1Level2Geometry, purpleMaterial);
+                innerPlatform4Level2.position.set(55, 2.45, 55);
+                scene.add(innerPlatform4Level2);
+
+                // **Inner Platform 4 Group: Level 2 Landing**
+                const innerPlatform4Level2ramp1LandingGeometry = new THREE.BoxGeometry(rampWidth + 10, 0.1, 7.6);
+                const innerPlatform4Level2ramp1Landing = new THREE.Mesh(innerPlatform4Level2ramp1LandingGeometry, whiteMaterial);
+                innerPlatform4Level2ramp1Landing.position.set(46.5, 7.425, 25);
+                scene.add(innerPlatform4Level2ramp1Landing);
+
+                // **Exterior Walls**
+
+                const wallNSGeometry = new THREE.BoxGeometry(200, 5, 1);
+                const wallEWGeometry = new THREE.BoxGeometry(1, 5, 200);
+
+                const northWall = new THREE.Mesh(wallNSGeometry, wallMaterial);
+                northWall.position.set(0, 2.5, 100);
+                scene.add(northWall);
+
+                const southWall = new THREE.Mesh(wallNSGeometry, wallMaterial);
+                southWall.position.set(0, 2.5, -100);
+                scene.add(southWall);
+
+                const eastWall = new THREE.Mesh(wallEWGeometry, wallMaterial);
+                eastWall.position.set(100, 2.5, 0);
+                scene.add(eastWall);
+
+                const westWall = new THREE.Mesh(wallEWGeometry, wallMaterial);
+                westWall.position.set(-100, 2.5, 0);
+                scene.add(westWall);
+
+            },
+            (progress) => {
+                console.log(`Loading wall texture: ${(progress.loaded / progress.total * 100).toFixed(2)}%`);
+            },
+            (error) => {
+                console.error('Error loading wall texture:', error);
+                const fallbackMaterial = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+
+                const innerWall1Geometry = new THREE.BoxGeometry(0.5, 1, 20);
+                const innerWall1 = new THREE.Mesh(innerWall1Geometry, fallbackMaterial);
+                innerWall1.position.set(-75, 0.5, 75);
+                scene.add(innerWall1);
+
+                const innerWall2Geometry = new THREE.BoxGeometry(0.5, 1, 20);
+                const innerWall2 = new THREE.Mesh(innerWall2Geometry, fallbackMaterial);
+                innerWall2.position.set(75, 0.5, -75);
+                scene.add(innerWall2);
+
+                const rampWidth = 20;
+                const rampHeight = 5;
+                const rampGeometry = new THREE.PlaneGeometry(rampWidth, rampHeight);
+                const rampMaterial = new THREE.MeshStandardMaterial({ color: 0x0000ff });
+                const ramp = new THREE.Mesh(rampGeometry, rampMaterial);
+                ramp.position.set(0, -0.5, 0);
+                ramp.rotation.x = -Math.PI / 3;
+                scene.add(ramp);
+
+                const wallNSGeometry = new THREE.BoxGeometry(200, 5, 1);
+                const wallEWGeometry = new THREE.BoxGeometry(1, 5, 200);
+
+                const northWall = new THREE.Mesh(wallNSGeometry, fallbackMaterial);
+                northWall.position.set(0, 2.5, 100);
+                scene.add(northWall);
+
+                const southWall = new THREE.Mesh(wallNSGeometry, fallbackMaterial);
+                southWall.position.set(0, 2.5, -100);
+                scene.add(southWall);
+
+                const eastWall = new THREE.Mesh(wallEWGeometry, fallbackMaterial);
+                eastWall.position.set(100, 2.5, 0);
+                scene.add(eastWall);
+
+                const westWall = new THREE.Mesh(wallEWGeometry, fallbackMaterial);
+                westWall.position.set(-100, 2.5, 0);
+                scene.add(westWall);
+            }
+        );
+
+        // Car and Animation Setup
+        let car;
+        let keyLight, fillLight, backLight;
+        let mixer;
+        let staticAction, leftAction, rightAction;
+        let eventQueue;
+        let cube;        // The visual cube mesh
+        let cubeBody;    // The physics rigid body for the cube
+        let spheres = [];
+        let sphereBodies = [];
+
+        const loader = new GLTFLoader();
+        initPhysics().then(() => {
+            console.log('Physics initialized');
+            eventQueue = new RAPIER.EventQueue(true);
+            loader.load(
+                'assets/toon_car.glb',
+                (gltf) => {
+                    car = gltf.scene;
+                    car.scale.set(0.1, 0.1, 0.1);
+                    car.position.set(30, 0.25, 0);
+                    car.rotation.y = Math.PI / 2;
+                    scene.add(car);
+                    updateCamera();
+                    console.log('Car model loaded:', car);
+
+                    // Animation Initialization
+                    mixer = new THREE.AnimationMixer(car);
+                    const animationsArray = gltf.animations;
+
+                    const staticClip = THREE.AnimationClip.findByName(animationsArray, 'Kart_Static');
+                    const leftClip = THREE.AnimationClip.findByName(animationsArray, 'Kart_Turn_Left');
+                    const rightClip = THREE.AnimationClip.findByName(animationsArray, 'Kart_Turn_Right');
+
+                    staticAction = mixer.clipAction(staticClip);
+                    leftAction = mixer.clipAction(leftClip);
+                    rightAction = mixer.clipAction(rightClip);
+
+                    staticAction.setLoop(THREE.LoopRepeat);
+                    leftAction.setLoop(THREE.LoopOnce);
+                    leftAction.clampWhenFinished = true;
+                    rightAction.setLoop(THREE.LoopOnce);
+                    rightAction.clampWhenFinished = true;
+
+                    leftAction.timeScale = 0.5;
+                    rightAction.timeScale = 0.5;
+
+                    staticAction.play();
+
+                    // Three-Point Lighting Setup
+                    keyLight = new THREE.SpotLight(0xe59b44, 0.5);
+                    keyLight.position.set(-2.5, 5, 5);
+                    keyLight.angle = Math.PI / 4;
+                    keyLight.penumbra = 1;
+                    keyLight.castShadow = false;
+                    keyLight.shadow.mapSize.width = 512;
+                    keyLight.shadow.mapSize.height = 512;
+                    keyLight.shadow.camera.near = 0.5;
+                    keyLight.shadow.camera.far = 20;
+                    keyLight.target = car;
+                    scene.add(keyLight);
+
+                    fillLight = new THREE.SpotLight(0xffffff, 0.5);
+                    fillLight.position.set(2.5, 5, 5);
+                    fillLight.angle = Math.PI / 4;
+                    fillLight.penumbra = 1;
+                    fillLight.castShadow = false;
+                    fillLight.shadow.mapSize.width = 512;
+                    fillLight.shadow.mapSize.height = 512;
+                    fillLight.shadow.camera.near = 0.5;
+                    fillLight.shadow.camera.far = 20;
+                    fillLight.target = car;
+                    scene.add(fillLight);
+
+                    backLight = new THREE.SpotLight(0xffffff, 1);
+                    backLight.position.set(0, 5, -5);
+                    backLight.angle = Math.PI / 4;
+                    backLight.penumbra = 1;
+                    backLight.castShadow = false;
+                    backLight.shadow.mapSize.width = 512;
+                    backLight.shadow.mapSize.height = 512;
+                    backLight.shadow.camera.near = 0.5;
+                    backLight.shadow.camera.far = 20;
+                    backLight.target = car;
+                    scene.add(backLight);
+
+                    // Initialize Orbiting Spheres
+                    const sphereGeometry = new THREE.SphereGeometry(0.2, 16, 16);
+                    const sphereMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+                    for (let i = 0; i < 3; i++) {
+                        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                        sphere.userData = { isFired: false };
+                        scene.add(sphere);
+                        spheres.push(sphere);
+
+                        let sphereBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+                            .setAdditionalMass(0.1)
+                            .setLinearDamping(0.1);
+                        let sphereBody = world.createRigidBody(sphereBodyDesc);
+                        let sphereColliderDesc = RAPIER.ColliderDesc.ball(0.5)
+                            .setRestitution(0.5)
+                            .setCollisionGroups(0x00010001) // Match wall collision group
+                            .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+                        sphereBody.userData = { type: 'sphere', index: i };
+                        world.createCollider(sphereColliderDesc, sphereBody);
+                        sphereBodies.push(sphereBody);
+                        console.log(`Created sphere ${i}`);
+
+
+                    }
+
+                    // Initialize the texture loader
+                    const textureLoader = new THREE.TextureLoader();
+
+                    // Load the JPG texture
+                    const cubeTexture = textureLoader.load('assets/collectable_box.jpg'); // Replace with your file path
+
+                    // Configure the texture to repeat
+                    cubeTexture.wrapS = THREE.RepeatWrapping; // Repeat horizontally
+                    cubeTexture.wrapT = THREE.RepeatWrapping; // Repeat vertically
+                    cubeTexture.repeat.set(1, 1); // 1 repetition per face; adjust (e.g., 2, 2) for more tiling
+
+                    // Create the cube inside your loop
+                    for (let i = 0; i < 1; i++) {
+                        // Create the collectible cube
+                        const cubeGeometry = new THREE.BoxGeometry(2, 2, 2);
+                        const cubeMaterial = new THREE.MeshStandardMaterial({
+                            map: cubeTexture,    // Use the texture instead of a color
+                            transparent: true,
+                            opacity: 0.7        // 10% opacity
+                        });
+                        cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+                        cube.position.set(0, 1, 0); // Position at (0, 0.5, 0)
+                        scene.add(cube);
+
+                        // Create physics body for the cube
+                        cubeBody = createCollectibleCube({ x: 0, y: 0.5, z: 0 });
+
+                        console.log(`Created cube ${i}`);
+                    }
+
+
+
+                    animate(); // Start animation
+                },
+                (progress) => {
+                    console.log(`Loading model: ${(progress.loaded / progress.total * 100).toFixed(2)}%`);
+                },
+                (error) => {
+                    console.error('Error loading GLTF model:', error);
+                }
+            );
+        });
+
+        // Camera
+        const cameraOffset = new THREE.Vector3(0, 1.7, -4.5);
+        function updateCamera() {
+            if (!car) return;
+            const carPosition = car.position.clone();
+            const carDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(car.quaternion);
+            const offset = carDirection.multiplyScalar(cameraOffset.z);
+            offset.y = cameraOffset.y;
+            camera.position.copy(carPosition).add(offset);
+            camera.lookAt(carPosition);
+        }
+
+        // Keyboard Controls and Animation Logic
+        const keys = { w: false, a: false, s: false, d: false };
+        let currentTurnAction = null;
+
+        window.addEventListener('keydown', (event) => {
+            if (event.key in keys) keys[event.key] = true;
+            if (mixer) {
+                if (event.key === 'a' && currentTurnAction !== leftAction) {
+                    // console.log("A key pressed: Starting Kart_Turn_Left");
+                    if (currentTurnAction) currentTurnAction.stop();
+                    staticAction.stop();
+                    leftAction.reset().play();
+                    currentTurnAction = leftAction;
+                } else if (event.key === 'd' && currentTurnAction !== rightAction) {
+                    // console.log("D key pressed: Starting Kart_Turn_Right");
+                    if (currentTurnAction) currentTurnAction.stop();
+                    staticAction.stop();
+                    rightAction.reset().play();
+                    currentTurnAction = rightAction;
+                }
+            }
+        });
+
+        window.addEventListener('keyup', (event) => {
+            if (event.key in keys) keys[event.key] = false;
+            if (mixer) {
+                if (event.key === 'a' && currentTurnAction === leftAction) {
+                    // console.log("A key released: Returning to Kart_Static");
+                    currentTurnAction.stop();
+                    staticAction.reset().play();
+                    currentTurnAction = null;
+                } else if (event.key === 'd' && currentTurnAction === rightAction) {
+                    // console.log("D key released: Returning to Kart_Static");
+                    currentTurnAction.stop();
+                    staticAction.reset().play();
+                    currentTurnAction = null;
+                }
+            }
+        });
+
+        // Mouse Controls for Firing Spheres
+        document.addEventListener('keydown', (event) => {
+            if (event.key === ' ' && car) { // Left click
+                const availableSpheres = spheres.filter(s => !s.userData.isFired);
+                if (availableSpheres.length > 0) {
+                    const sphere = availableSpheres[0];
+                    sphere.userData.isFired = true;
+                    const sphereIndex = spheres.indexOf(sphere);
+                    const sphereBody = sphereBodies[sphereIndex];
+                    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(car.quaternion);
+                    const launchSpeed = 80;
+                    sphereBody.setLinvel({ x: forward.x * launchSpeed, y: 0, z: forward.z * launchSpeed }, true);
+                    console.log(`Fired sphere ${sphereIndex}`);
+                }
+            }
+        });
+
+        // Update Spheres Function
+        const orbitRadius = 2;
+        const orbitSpeed = 2;
+        function updateSpheres(delta) {
+            const time = clock.getElapsedTime();
+            spheres.forEach((sphere, index) => {
+                if (sphere.userData.isFired) {
+                    const position = sphereBodies[index].translation();
+                    sphere.position.set(position.x, position.y, position.z);
+                } else {
+                    const angle = (index * 2 * Math.PI / 3) + time * orbitSpeed;
+                    const offset = new THREE.Vector3(
+                        Math.cos(angle) * orbitRadius,
+                        0.25,
+                        Math.sin(angle) * orbitRadius
+                    );
+                    sphere.position.copy(car.position).add(offset);
+                    sphereBodies[index].setTranslation(
+                        { x: sphere.position.x, y: sphere.position.y, z: sphere.position.z },
+                        true
+                    );
+                }
+            });
+        }
+
+        // Animation Loop
+        let speed = 0;
+        let physicsRampMeshes = []; // Store physics ramp visualizations
+        let physicsWallMeshes = []; // Store physics ramp visualizations
+        let physicsPlatformMeshes = []; // Store physics ramp visualizations
+
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            if (car) {
+
+                const { position, rotation, displaySpeed, spheresToRemove, collectedCube, velocity, ramps, walls, platforms } = updatePhysics(delta, keys, eventQueue, spheres, sphereBodies);
+                car.position.set(position.x, position.y, position.z);
+                car.quaternion.set(rotation.x, rotation.y, rotation.z, rotation.w);
+                speed = displaySpeed;
+
+                // Handle cube collection
+                if (collectedCube) {
+                    cube.visible = false;         // Hide the cube mesh
+                    world.removeRigidBody(cubeBody);  // Remove physics body
+                    setTimeout(() => {
+                        cubeBody = createCollectibleCube({ x: 0, y: 0.5, z: 0 });  // Recreate physics body
+                        cube.visible = true;        // Show the cube again
+                    }, 10000);  // Reappear after 10 seconds
+                }
+
+
+                // Remove spheres from scene and arrays based on physics update
+                if (spheresToRemove && spheresToRemove.length > 0) {
+                    spheresToRemove.forEach(index => {
+                        console.log(`Removing sphere ${index} from scene`);
+                        scene.remove(spheres[index]);
+                        spheres.splice(index, 1);
+                        sphereBodies.splice(index, 1);
+                        sphereBodies.forEach((body, i) => {
+                            body.userData.index = i;
+                        });
+                        console.log('Remaining spheres:', spheres.length);
+                    });
+                }
+
+                updateSpheres(delta);
+
+                if (keyLight && fillLight && backLight) {
+                    const carPosition = car.position;
+                    const carQuaternion = car.quaternion;
+
+                    const keyLightOffset = new THREE.Vector3(-2.5, 5, 5);
+                    keyLight.position.copy(keyLightOffset).applyQuaternion(carQuaternion).add(carPosition);
+
+                    const fillLightOffset = new THREE.Vector3(2.5, 5, 5);
+                    fillLight.position.copy(fillLightOffset).applyQuaternion(carQuaternion).add(carPosition);
+
+                    const backLightOffset = new THREE.Vector3(0, 5, -5);
+                    backLight.position.copy(backLightOffset).applyQuaternion(carQuaternion).add(carPosition);
+                }
+            }
+            updateCamera();
+            if (car) {
+                const position = car.position;
+                document.getElementById('debug').innerHTML = `
+                    Position: (${position.x.toFixed(2)}, ${position.y.toFixed(2)}, ${position.z.toFixed(2)})<br>
+                    Speed: ${speed.toFixed(2)} m/s
+                `;
+            }
+            if (mixer) mixer.update(delta);
+            composer.render();
+        }
+
+        // Window Resize Handler
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+            bloomPass.setSize(window.innerWidth, window.innerHeight);
+            fxaaPass.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+        });
+
+        // Debug Helper
+        function rotationToDirection(rotation) {
+            const angle = ((rotation * 180 / Math.PI) % 360 + 360) % 360;
+            if (angle >= 337.5 || angle < 22.5) return 'North';
+            if (angle >= 22.5 && angle < 67.5) return 'North-West';
+            if (angle >= 67.5 && angle < 112.5) return 'West';
+            if (angle >= 112.5 && angle < 157.5) return 'South-West';
+            if (angle >= 157.5 && angle < 202.5) return 'South';
+            if (angle >= 202.5 && angle < 247.5) return 'South-East';
+            if (angle >= 247.5 && angle < 292.5) return 'East';
+            if (angle >= 292.5 && angle < 337.5) return 'North-East';
+        }
+    </script>
+</body>
+
+</html>
